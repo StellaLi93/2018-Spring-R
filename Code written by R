@@ -1,0 +1,205 @@
+### Missing Data
+library(ggplot2)
+library(lattice)
+library(caret)
+library(dplyr)
+library(mice)
+library(VIM)
+library(usdm)
+library(leaps)
+############## Loading data ############
+
+## Read the file
+data = read.csv("E:/Fordham/R/final/AnimalTrim.csv",
+                stringsAsFactors = TRUE,
+                header = TRUE,
+                encoding = 'utf-8')
+data = data.frame(data) 
+
+##############  Pre-anlaysis    ###############
+
+## drop the first two column                           #########????
+
+
+
+#we can create a scatterplot matrix using pairs()
+summary(data)
+str(data)
+sapply(data, function(x) sum(is.na(x)))
+
+######There's 18 missing data of Age
+
+###############    Looking into the missing data   ###########
+
+#combine the first 100 observations with any observation that has a missing value
+sampleData<- rbind(data[c(1:100), ], data[!complete.cases(data),])[, -1]
+
+#There are 18 miss value of Age
+
+md.pattern(sampleData)
+
+
+#aggr plots proportions of missing variables, The missing value is about 15% of the whole Sample data
+aggr(sampleData, numbers=T, sortVars=T)
+
+
+
+###########         Imputing the missing data using mice() function ############
+
+#(1)  Input data
+#let's use mice to impute 5 datasets
+Age.mice<- mice(data = sampleData, m = 5, seed = 1234)
+summary(Age.mice)
+
+#(2) Check the imputed data
+#The output shows the imputed data for observation within the imputed dataset.
+Age.mice$imp$Age
+
+
+#(3) Complete the dataset and Inspecting the distribution
+complete1<- complete(Age.mice, 1)
+complete2<- complete(Age.mice, 2)
+complete3<- complete(Age.mice, 3)
+complete4<- complete(Age.mice, 4)
+complete5<- complete(Age.mice, 5)
+
+
+#we can visually compare our imputations using stripchart from the lattice package
+
+stripplot(Age.mice, pch=20)
+
+
+####################       Perform Linear regression ################
+# Use all variables to predict Age over each imputed dataset.
+
+#(1) now we can apply regression to each dataset individually, or apply it all at once using with()
+Age.lm.mice<- with(data = Age.mice, expr = lm(Age ~ AnimalType+MixColor+Outcome+Sex+BreedType+HasName))
+summary(Age.lm.mice)
+#imputation 5 is the best
+
+#(2) we can check diagnositics of each model using sapply
+par(mfrow=c(2,2))
+sapply(Age.lm.mice$analyses, plot)
+par(mfrow=c(1,1)) 
+
+#(3) Analyze both the individual results and the pooled result.
+
+#can pool adjusted r squared
+pool.r.squared(Age.lm.mice, adjusted = T) 
+
+####################     Prediction     ################
+
+#(1) Prediction
+#make a predictions
+lapply(Age.lm.mice$analyses, predict)
+
+
+
+########   Merge data
+data[!complete.cases(data),]$Age <- Age.mice$imp$Age$`5`
+
+data = data[,c(-1)]
+
+
+
+##########Split into training/testing#####
+
+set.seed(123)
+
+
+data.split1<- createDataPartition(data$OutcomeType, p=.75, list=F)
+training2<- data[data.split1,]
+testing2<- data[-data.split1,]
+
+
+
+#####pre-analysis 
+
+pairs(data[,], lower.panel = panel.smooth)
+
+
+vif(data[, ])  
+
+##Visualization
+ggplot(data = data, aes(x=OutcomeType)) +
+  geom_histogram(stat = "Count", fill="lightcoral", col="black") +
+  labs(title="Outcome Result") 
+###########  Let's compare Cat and Dog  ##########
+#  We have more positive obeservation on Dog, and more negative observations on cat
+ggplot(data = data, aes(x=OutcomeType, fill=AnimalType)) +
+  geom_bar(position = "fill") +  
+  labs(title="Outcome Result Cat vs. Dog")
+
+#  We have more positive obeservation on Dog, and more negative observations on cat
+# Just slightly different
+ggplot(data = data, aes(x=OutcomeType, fill=BreedType)) +
+  geom_bar(position = "fill") +  
+  labs(title="Outcome Result Mix vs. Not Mix")
+
+
+
+
+#####modeling  logistic regression
+
+####model 1 
+
+animal.glm<- glm(OutcomeType ~AnimalType+MixColor+Outcome+Sex+BreedType+HasName+Age+OutcomeMonth
+                 , data=training2, family = binomial())
+summary(animal.glm)
+
+##feature selection 
+animal.glm.f <- regsubsets(OutcomeType ~ AnimalType+MixColor+Outcome+Sex+BreedType+HasName+Age+OutcomeMonth,
+                           data=training2,
+                           method="forward",
+                           nvmax=8)
+
+summary(animal.glm.f)$bic
+summary(animal.glm.f)
+
+####model 2
+
+animal.glm2<- glm(OutcomeType ~ AnimalType+Outcome+HasName+Age
+                 , data=training2, family = binomial())
+summary(animal.glm2)
+
+anova(animal.glm,animal.glm2, test = "Chisq")
+
+
+######Model Accuracy  
+
+xtabs(~ testing2$OutcomeType + round(predict(animal.glm2, newdata=testing2, type="response"), 0))
+##training accuracy
+animal.glm.prob.train<- predict(animal.glm2, newdata = training2, type = "response")
+animal.glm.class.train<- ifelse(animal.glm.prob.train<.5, "Negative","Positive")  
+
+mean(animal.glm.class.train==training2$OutcomeType)
+##testing accuracy
+animal.glm.prob.test<- predict(animal.glm2, newdata = testing2, type = "response")
+animal.glm.class.test<- ifelse(animal.glm.prob.test<.5, "Negative","Positive")  
+
+mean(animal.glm.class.test==testing2$OutcomeType)
+
+#############validation
+set.seed(123)
+animal.glm.cv<-
+  train(OutcomeType ~ AnimalType+Outcome+HasName+Age, data=data, method="glm", family=binomial(),
+        trControl=trainControl(method="boot", number = 20,
+                               savePredictions = T))
+
+
+animal.glm.cv$results
+animal.glm.cv
+
+animal.glm.cv$resample 
+
+ggplot(animal.glm.cv$resample, aes(x=Accuracy)) +
+  geom_density(alpha=.2, fill="red")
+
+ggplot(animal.glm.cv$resample, aes(x=Accuracy)) +
+  geom_histogram(binwidth = .006, alpha=.6, fill="red")
+
+quantile(animal.glm.cv$resample$Accuracy)
+
+
+
+
